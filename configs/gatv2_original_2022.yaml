@@ -1,0 +1,27 @@
+experiment_name: gatv2_original_2022_architecture_replication
+paper: Brody et al. 2022
+track: architecture_replication
+
+dataset:
+  name: selected_small_benchmark
+  source: pytorch_geometric
+  reason: manageable GAT vs GATv2 comparison
+
+models:
+  - gat
+  - gatv2
+
+task:
+  type: node_classification
+
+training:
+  seeds: [42]
+  epochs: null
+  optimizer: adam
+  learning_rate: null
+
+metrics:
+  - accuracy
+  - f1
+
+status: pending

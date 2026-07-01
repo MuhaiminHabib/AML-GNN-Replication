@@ -1,0 +1,28 @@
+experiment_name: graphsage_original_2017_architecture_replication
+paper: Hamilton et al. 2017
+track: architecture_replication
+
+dataset:
+  name: ppi
+  source: pytorch_geometric
+  reason: manageable benchmark for GraphSAGE replication
+
+model:
+  name: graphsage
+  aggregator: mean
+  num_layers: 2
+  hidden_dim: 256
+
+task:
+  type: node_classification
+
+training:
+  seeds: [42]
+  epochs: null
+  optimizer: adam
+  learning_rate: null
+
+metrics:
+  - micro_f1
+
+status: pending
