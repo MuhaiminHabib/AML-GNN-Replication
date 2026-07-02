@@ -13,6 +13,7 @@ env/
 data/raw/
 data/processed/
 data/external/
+data/external_repos/
 
 # Outputs
 outputs/
