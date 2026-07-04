@@ -1,6 +1,5 @@
 from typing import Dict
 
-import numpy as np
 import torch
 from sklearn.metrics import accuracy_score, f1_score, precision_score, recall_score
 
@@ -9,13 +8,18 @@ def compute_binary_metrics(
     logits: torch.Tensor,
     y: torch.Tensor,
     mask: torch.Tensor,
+    positive_label: int = 1,
 ) -> Dict[str, float]:
     """
     Compute binary classification metrics.
 
-    Label convention:
-    - illicit = 1
-    - licit = 0
+    positive_label should be the label representing the class of interest.
+
+    For Weber-style setup:
+        illicit = 1
+
+    For Marasi-style setup:
+        illicit = 0
     """
     if mask.sum().item() == 0:
         return {
@@ -32,13 +36,13 @@ def compute_binary_metrics(
     return {
         "accuracy": accuracy_score(y_true, y_pred),
         "illicit_precision": precision_score(
-            y_true, y_pred, pos_label=1, zero_division=0
+            y_true, y_pred, pos_label=positive_label, zero_division=0
         ),
         "illicit_recall": recall_score(
-            y_true, y_pred, pos_label=1, zero_division=0
+            y_true, y_pred, pos_label=positive_label, zero_division=0
         ),
         "illicit_f1": f1_score(
-            y_true, y_pred, pos_label=1, zero_division=0
+            y_true, y_pred, pos_label=positive_label, zero_division=0
         ),
         "micro_f1": f1_score(
             y_true, y_pred, average="micro", zero_division=0
