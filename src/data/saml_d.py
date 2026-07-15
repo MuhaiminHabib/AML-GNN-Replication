@@ -6,6 +6,7 @@ import torch
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import OneHotEncoder, StandardScaler
 from torch_geometric.data import Data
+from torch_geometric.utils import coalesce
 
 
 def _one_hot(df: pd.DataFrame, cols: list[str]) -> np.ndarray:
@@ -22,6 +23,7 @@ def build_saml_d_graph(
     seed: int = 42,
     val_size: float = 0.15,
     test_size: float = 0.20,
+    coalesce_edges: bool = True,
 ) -> Data:
     data_dir = Path(data_dir)
     csv_path = data_dir / "SAML-D.csv"
@@ -51,9 +53,6 @@ def build_saml_d_graph(
     if missing:
         raise ValueError(f"Missing columns: {missing}")
 
-    # ------------------------------------------------------------------
-    # Nodes = all unique accounts appearing as sender or receiver.
-    # ------------------------------------------------------------------
     sender_accounts = df["Sender_account"].astype(str)
     receiver_accounts = df["Receiver_account"].astype(str)
 
@@ -62,12 +61,20 @@ def build_saml_d_graph(
     num_nodes = len(accounts)
 
     print(f"Number of account nodes: {num_nodes:,}")
-    print(f"Number of transaction edges: {len(df):,}")
+    print(f"Number of raw transaction edges: {len(df):,}")
 
     src = sender_accounts.map(account_to_idx).to_numpy()
     dst = receiver_accounts.map(account_to_idx).to_numpy()
 
     edge_index = torch.tensor(np.vstack([src, dst]), dtype=torch.long)
+
+    if coalesce_edges:
+        before_edges = edge_index.size(1)
+        edge_index = coalesce(edge_index, num_nodes=num_nodes)
+        after_edges = edge_index.size(1)
+        print(f"Coalesced edges: {before_edges:,} -> {after_edges:,}")
+    else:
+        print(f"Using raw edges: {edge_index.size(1):,}")
 
     # ------------------------------------------------------------------
     # Node label:
@@ -86,16 +93,24 @@ def build_saml_d_graph(
         ).unique()
     )
 
-    laundering_idx = [account_to_idx[a] for a in laundering_accounts if a in account_to_idx]
+    laundering_idx = [
+        account_to_idx[a]
+        for a in laundering_accounts
+        if a in account_to_idx
+    ]
     y_np[laundering_idx] = 1
 
     # ------------------------------------------------------------------
     # Timestamp features.
     # ------------------------------------------------------------------
-    timestamp = pd.to_datetime(df["Date"].astype(str) + " " + df["Time"].astype(str))
+    timestamp = pd.to_datetime(
+        df["Date"].astype(str) + " " + df["Time"].astype(str),
+        errors="coerce",
+    )
+
     df["timestamp_seconds"] = timestamp.astype("int64") // 10**9
-    df["hour"] = timestamp.dt.hour
-    df["dayofweek"] = timestamp.dt.dayofweek
+    df["hour"] = timestamp.dt.hour.fillna(0).astype(int)
+    df["dayofweek"] = timestamp.dt.dayofweek.fillna(0).astype(int)
 
     # ------------------------------------------------------------------
     # Transaction statistics by sender and receiver.
@@ -111,6 +126,7 @@ def build_saml_d_graph(
         out_first_time=("timestamp_seconds", "min"),
         out_last_time=("timestamp_seconds", "max"),
         out_unique_receivers=("Receiver_account", "nunique"),
+        out_unique_receiver_locations=("Receiver_bank_location", "nunique"),
     )
 
     receiver_stats = df.groupby("Receiver_account").agg(
@@ -123,17 +139,20 @@ def build_saml_d_graph(
         in_first_time=("timestamp_seconds", "min"),
         in_last_time=("timestamp_seconds", "max"),
         in_unique_senders=("Sender_account", "nunique"),
+        in_unique_sender_locations=("Sender_bank_location", "nunique"),
     )
 
-    # Dominant categorical behaviour per account.
     sender_cat = df.groupby("Sender_account").agg(
         sender_payment_currency=("Payment_currency", lambda x: x.mode().iloc[0]),
-        sender_bank_location=("Sender_bank_location", lambda x: x.mode().iloc[0]),
+        sender_received_currency=("Received_currency", lambda x: x.mode().iloc[0]),
         sender_payment_type=("Payment_type", lambda x: x.mode().iloc[0]),
+        sender_bank_location=("Sender_bank_location", lambda x: x.mode().iloc[0]),
     )
 
     receiver_cat = df.groupby("Receiver_account").agg(
+        receiver_payment_currency=("Payment_currency", lambda x: x.mode().iloc[0]),
         receiver_received_currency=("Received_currency", lambda x: x.mode().iloc[0]),
+        receiver_payment_type=("Payment_type", lambda x: x.mode().iloc[0]),
         receiver_bank_location=("Receiver_bank_location", lambda x: x.mode().iloc[0]),
     )
 
@@ -154,7 +173,19 @@ def build_saml_d_graph(
 
     skewed_cols = [
         c for c in numeric_cols
-        if "count" in c or "amount" in c or "unique" in c
+        if any(
+            key in c
+            for key in [
+                "count",
+                "amount",
+                "sum",
+                "mean",
+                "std",
+                "min",
+                "max",
+                "unique",
+            ]
+        )
     ]
 
     for col in skewed_cols:
@@ -175,9 +206,12 @@ def build_saml_d_graph(
 
     categorical_cols = [
         "sender_payment_currency",
-        "sender_bank_location",
+        "sender_received_currency",
         "sender_payment_type",
+        "sender_bank_location",
+        "receiver_payment_currency",
         "receiver_received_currency",
+        "receiver_payment_type",
         "receiver_bank_location",
     ]
 
@@ -188,9 +222,6 @@ def build_saml_d_graph(
 
     x_np = np.hstack([numeric_x, cat_x]).astype(np.float32)
 
-    # ------------------------------------------------------------------
-    # Stratified train/val/test split over account labels.
-    # ------------------------------------------------------------------
     all_idx = np.arange(num_nodes)
 
     train_val_idx, test_idx = train_test_split(
@@ -230,6 +261,7 @@ def build_saml_d_graph(
     data.task_name = "account_node_classification"
     data.num_transactions = len(df)
     data.num_laundering_transactions = int(df["Is_laundering"].sum())
+    data.coalesced_edges = bool(coalesce_edges)
 
     return data
 
