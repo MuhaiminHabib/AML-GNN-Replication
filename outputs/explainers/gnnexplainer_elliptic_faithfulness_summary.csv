@@ -1,0 +1,3 @@
+dataset,model,explainer,nodes_explained,deletion_drop_mean,deletion_drop_std,insertion_prob_mean,insertion_prob_std,insertion_gap_mean,deletion_label_flip_rate,insertion_preservation_rate,sparsity_mean,num_explanation_edges_mean,num_explanation_nodes_mean,edge_mask_mean,edge_mask_max_mean
+Elliptic,gatv2,GNNExplainer,10,0.008230775594711304,0.022147989851836195,0.9876515388488769,0.005222606073077206,0.0,0.0,1.0,0.9994539100043689,20.0,36.0,2.128204268956324e-05,0.36313238739967346
+Elliptic,graphsage,GNNExplainer,10,0.2680282831192017,0.3033671417148517,0.9935068607330322,0.01235814737118123,0.0,0.2,1.0,0.9994539100043689,20.0,34.9,4.2814978405655567e-05,0.7768825054168701
