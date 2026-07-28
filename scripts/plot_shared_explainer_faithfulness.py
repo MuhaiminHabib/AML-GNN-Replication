@@ -39,15 +39,23 @@ def load_data():
 
 def normalise_explainer_names(df):
     name_map = {
-        "DGL_SubgraphX": "SubgraphX",
         "GNNExplainer": "GNNExplainer",
         "PGExplainer": "PGExplainer",
+        "DGL_SubgraphX": "SubgraphX",
+        "DGL_SubgraphX_large": "SubgraphX-large",
     }
 
     df = df.copy()
     df["explainer_display"] = df["explainer"].map(name_map).fillna(df["explainer"])
+    df["explainer_display"] = df["explainer_display"].astype(str)
 
-    order = ["GNNExplainer", "PGExplainer", "SubgraphX"]
+    order = [
+        "GNNExplainer",
+        "PGExplainer",
+        "SubgraphX",
+        "SubgraphX-large",
+    ]
+
     df["explainer_display"] = pd.Categorical(
         df["explainer_display"],
         categories=order,

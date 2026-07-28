@@ -21,6 +21,7 @@ INPUT_FILES = [
     OUTPUT_DIR / "gnnexplainer_shared_graphsage_results.csv",
     OUTPUT_DIR / "pgexplainer_shared_graphsage_results.csv",
     OUTPUT_DIR / "dgl_subgraphx_shared_graphsage_results.csv",
+    OUTPUT_DIR / "dgl_subgraphx_shared_graphsage_large_results.csv",
 ]
 
 DETAIL_OUTPUT = OUTPUT_DIR / "shared_explainer_faithfulness.csv"
