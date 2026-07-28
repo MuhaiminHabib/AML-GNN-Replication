@@ -1,0 +1,8 @@
+dataset,feature_setting,model,node_id,true_label,pred_label,pred_prob_illicit,ego_hops,num_ego_nodes
+Elliptic,tx+agg,graphsage,29912,0,0,0.9849860668182373,2,11
+Elliptic,tx+agg,graphsage,19539,0,0,0.9418798685073853,2,21
+Elliptic,tx+agg,graphsage,18903,0,0,0.9391763806343079,2,27
+Elliptic,tx+agg,graphsage,18323,0,0,0.8480489253997803,2,6
+Elliptic,tx+agg,graphsage,17047,0,0,0.8437139987945557,2,6
+Elliptic,tx+agg,graphsage,24239,0,0,0.7818787097930908,2,21
+Elliptic,tx+agg,graphsage,25447,0,0,0.5857320427894592,2,5
