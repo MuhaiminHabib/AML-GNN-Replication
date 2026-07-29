@@ -3,48 +3,62 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import torch
-from sklearn.model_selection import train_test_split
-from sklearn.preprocessing import OneHotEncoder, StandardScaler
 from torch_geometric.data import Data
 
 
-def _one_hot_encode(df: pd.DataFrame, columns):
-    if not columns:
-        return np.empty((len(df), 0), dtype=np.float32)
-
-    encoder = OneHotEncoder(sparse_output=False, handle_unknown="ignore")
-    encoded = encoder.fit_transform(df[columns])
-    return encoded.astype(np.float32)
+ILLICIT_LABEL = 1
+LICIT_LABEL = 0
 
 
-def _safe_log1p(values: np.ndarray) -> np.ndarray:
-    values = np.asarray(values, dtype=np.float32)
-    values = np.maximum(values, 0.0)
-    return np.log1p(values)
+def _standardise_numeric(series: pd.Series) -> pd.Series:
+    series = series.astype(float)
+    std = series.std()
+
+    if std == 0 or np.isnan(std):
+        return series * 0.0
+
+    return (series - series.mean()) / std
 
 
-def build_ibm_amlsim_graph(
+def build_ibm_amlsim_data(
     data_dir: str | Path = "data/raw/ibm_amlsim",
     seed: int = 42,
-    val_size: float = 0.15,
-    test_size: float = 0.20,
+    train_ratio: float = 0.60,
+    val_ratio: float = 0.20,
+    test_ratio: float = 0.20,
+    temporal_split: bool = False,
+    label_source: str = "accounts",
 ) -> Data:
     """
-    Build a full IBM AMLSim account-level graph.
+    Build a PyTorch Geometric account-level graph from IBM AMLSim-style CSV files.
 
-    Nodes:
-        Accounts from accounts.csv.
+    Expected files:
+        accounts.csv
+        transactions.csv
 
-    Edges:
-        Directed transactions from sender account to receiver account.
+    Node:
+        ACCOUNT_ID
 
-    Label:
-        accounts.csv -> IS_FRAUD
-        normal = 0, fraud = 1
+    Edge:
+        SENDER_ACCOUNT_ID -> RECEIVER_ACCOUNT_ID
 
-    Important:
-        This loader intentionally does NOT use transaction IS_FRAUD or ALERT_ID
-        as node features, because those would introduce label leakage.
+    Label options:
+        label_source="accounts":
+            Use accounts.IS_FRAUD directly.
+
+        label_source="transactions":
+            Mark an account as fraud if it appears in at least one fraudulent
+            transaction.
+
+        label_source="combined":
+            Mark an account as fraud if either accounts.IS_FRAUD is True or the
+            account appears in at least one fraudulent transaction.
+
+    Main recommended setting:
+        label_source="accounts"
+
+    Features:
+        account attributes + transaction aggregation features
     """
 
     data_dir = Path(data_dir)
@@ -52,135 +66,279 @@ def build_ibm_amlsim_graph(
     accounts_path = data_dir / "accounts.csv"
     transactions_path = data_dir / "transactions.csv"
 
+    if not accounts_path.exists():
+        raise FileNotFoundError(f"Missing accounts file: {accounts_path}")
+
+    if not transactions_path.exists():
+        raise FileNotFoundError(f"Missing transactions file: {transactions_path}")
+
     accounts = pd.read_csv(accounts_path)
-    transactions = pd.read_csv(transactions_path)
+    tx = pd.read_csv(transactions_path)
+
+    required_account_cols = {
+        "ACCOUNT_ID",
+        "INIT_BALANCE",
+        "COUNTRY",
+        "ACCOUNT_TYPE",
+        "IS_FRAUD",
+        "TX_BEHAVIOR_ID",
+    }
+
+    required_tx_cols = {
+        "SENDER_ACCOUNT_ID",
+        "RECEIVER_ACCOUNT_ID",
+        "TX_AMOUNT",
+        "TIMESTAMP",
+        "IS_FRAUD",
+    }
+
+    missing_accounts = required_account_cols - set(accounts.columns)
+    missing_tx = required_tx_cols - set(tx.columns)
+
+    if missing_accounts:
+        raise ValueError(f"accounts.csv missing columns: {sorted(missing_accounts)}")
+
+    if missing_tx:
+        raise ValueError(f"transactions.csv missing columns: {sorted(missing_tx)}")
+
+    accounts = accounts.copy()
+    tx = tx.copy()
+
+    label_source = label_source.lower()
+
+    valid_label_sources = {"accounts", "transactions", "combined"}
+
+    if label_source not in valid_label_sources:
+        raise ValueError(
+            f"Invalid label_source={label_source}. "
+            f"Expected one of: {sorted(valid_label_sources)}"
+        )
+
+    accounts["ACCOUNT_ID"] = accounts["ACCOUNT_ID"].astype(int)
+    tx["SENDER_ACCOUNT_ID"] = tx["SENDER_ACCOUNT_ID"].astype(int)
+    tx["RECEIVER_ACCOUNT_ID"] = tx["RECEIVER_ACCOUNT_ID"].astype(int)
 
     accounts = accounts.sort_values("ACCOUNT_ID").reset_index(drop=True)
 
-    account_ids = accounts["ACCOUNT_ID"].to_numpy()
-    account_to_idx = {account_id: idx for idx, account_id in enumerate(account_ids)}
+    account_ids = accounts["ACCOUNT_ID"].tolist()
+    account_to_idx = {
+        account_id: idx
+        for idx, account_id in enumerate(account_ids)
+    }
 
-    # Target label only. Do not include this in features.
-    y_np = accounts["IS_FRAUD"].astype(bool).astype(int).to_numpy()
+    # Keep transactions where both sender and receiver exist in accounts.csv.
+    tx = tx[
+        tx["SENDER_ACCOUNT_ID"].isin(account_to_idx)
+        & tx["RECEIVER_ACCOUNT_ID"].isin(account_to_idx)
+    ].copy()
 
-    # Account-level numeric features.
-    numeric_features = accounts[["INIT_BALANCE", "TX_BEHAVIOR_ID"]].copy()
+    tx["src_idx"] = tx["SENDER_ACCOUNT_ID"].map(account_to_idx).astype(int)
+    tx["dst_idx"] = tx["RECEIVER_ACCOUNT_ID"].map(account_to_idx).astype(int)
+    tx["TX_AMOUNT"] = tx["TX_AMOUNT"].astype(float)
+    tx["TIMESTAMP"] = tx["TIMESTAMP"].astype(int)
+    tx["IS_FRAUD"] = tx["IS_FRAUD"].astype(bool)
 
-    # Account-level categorical features.
-    categorical_x = _one_hot_encode(accounts, ["COUNTRY", "ACCOUNT_TYPE"])
+    num_accounts = len(accounts)
 
-    # Transaction-derived features.
-    # Do NOT use IS_FRAUD or ALERT_ID here.
-    outgoing_stats = (
-        transactions
-        .groupby("SENDER_ACCOUNT_ID")
-        .agg(
-            out_tx_count=("TX_ID", "count"),
-            out_amount_sum=("TX_AMOUNT", "sum"),
-            out_amount_mean=("TX_AMOUNT", "mean"),
-            out_amount_std=("TX_AMOUNT", "std"),
-            out_amount_min=("TX_AMOUNT", "min"),
-            out_amount_max=("TX_AMOUNT", "max"),
-            out_first_time=("TIMESTAMP", "min"),
-            out_last_time=("TIMESTAMP", "max"),
-            out_unique_receivers=("RECEIVER_ACCOUNT_ID", "nunique"),
-        )
+    # -------------------------------------------------------------------------
+    # Transaction aggregation features at account/node level
+    # -------------------------------------------------------------------------
+    out_degree = (
+        tx.groupby("src_idx")
+        .size()
+        .reindex(range(num_accounts), fill_value=0)
     )
 
-    incoming_stats = (
-        transactions
-        .groupby("RECEIVER_ACCOUNT_ID")
-        .agg(
-            in_tx_count=("TX_ID", "count"),
-            in_amount_sum=("TX_AMOUNT", "sum"),
-            in_amount_mean=("TX_AMOUNT", "mean"),
-            in_amount_std=("TX_AMOUNT", "std"),
-            in_amount_min=("TX_AMOUNT", "min"),
-            in_amount_max=("TX_AMOUNT", "max"),
-            in_first_time=("TIMESTAMP", "min"),
-            in_last_time=("TIMESTAMP", "max"),
-            in_unique_senders=("SENDER_ACCOUNT_ID", "nunique"),
-        )
+    in_degree = (
+        tx.groupby("dst_idx")
+        .size()
+        .reindex(range(num_accounts), fill_value=0)
     )
 
-    stats = pd.DataFrame({"ACCOUNT_ID": account_ids}).set_index("ACCOUNT_ID")
-    stats = stats.join(outgoing_stats, how="left").join(incoming_stats, how="left")
-    stats = stats.fillna(0.0)
+    total_sent = (
+        tx.groupby("src_idx")["TX_AMOUNT"]
+        .sum()
+        .reindex(range(num_accounts), fill_value=0.0)
+    )
 
-    # Extra structural ratios.
-    stats["total_tx_count"] = stats["out_tx_count"] + stats["in_tx_count"]
-    stats["total_amount_sum"] = stats["out_amount_sum"] + stats["in_amount_sum"]
-    stats["out_in_count_ratio"] = stats["out_tx_count"] / (stats["in_tx_count"] + 1.0)
-    stats["in_out_count_ratio"] = stats["in_tx_count"] / (stats["out_tx_count"] + 1.0)
+    total_received = (
+        tx.groupby("dst_idx")["TX_AMOUNT"]
+        .sum()
+        .reindex(range(num_accounts), fill_value=0.0)
+    )
 
-    # Log-transform skewed count/amount features.
-    skewed_cols = [
-        "out_tx_count",
-        "out_amount_sum",
-        "out_amount_mean",
-        "out_amount_std",
-        "out_amount_min",
-        "out_amount_max",
-        "out_unique_receivers",
-        "in_tx_count",
-        "in_amount_sum",
-        "in_amount_mean",
-        "in_amount_std",
-        "in_amount_min",
-        "in_amount_max",
-        "in_unique_senders",
-        "total_tx_count",
-        "total_amount_sum",
-    ]
+    mean_sent = (
+        tx.groupby("src_idx")["TX_AMOUNT"]
+        .mean()
+        .reindex(range(num_accounts), fill_value=0.0)
+    )
 
-    for col in skewed_cols:
-        stats[col] = _safe_log1p(stats[col].to_numpy())
+    mean_received = (
+        tx.groupby("dst_idx")["TX_AMOUNT"]
+        .mean()
+        .reindex(range(num_accounts), fill_value=0.0)
+    )
 
-    # Scale numeric features.
-    scaler = StandardScaler()
-    account_numeric_x = scaler.fit_transform(numeric_features).astype(np.float32)
+    fraud_tx = tx[tx["IS_FRAUD"]]
 
-    stats_scaler = StandardScaler()
-    stats_x = stats_scaler.fit_transform(stats.to_numpy()).astype(np.float32)
+    fraud_sent_count = (
+        fraud_tx.groupby("src_idx")
+        .size()
+        .reindex(range(num_accounts), fill_value=0)
+    )
 
-    x_np = np.concatenate([account_numeric_x, categorical_x, stats_x], axis=1)
+    fraud_received_count = (
+        fraud_tx.groupby("dst_idx")
+        .size()
+        .reindex(range(num_accounts), fill_value=0)
+    )
 
-    # Full directed transaction graph.
-    src = transactions["SENDER_ACCOUNT_ID"].map(account_to_idx)
-    dst = transactions["RECEIVER_ACCOUNT_ID"].map(account_to_idx)
+    agg_features = pd.DataFrame(
+        {
+            "out_degree": out_degree.values,
+            "in_degree": in_degree.values,
+            "total_sent_amount": total_sent.values,
+            "total_received_amount": total_received.values,
+            "mean_sent_amount": mean_sent.values,
+            "mean_received_amount": mean_received.values,
+            "fraud_tx_sent_count": fraud_sent_count.values,
+            "fraud_tx_received_count": fraud_received_count.values,
+        }
+    )
 
-    valid_edges = src.notna() & dst.notna()
-    src = src[valid_edges].astype(int).to_numpy()
-    dst = dst[valid_edges].astype(int).to_numpy()
+    # -------------------------------------------------------------------------
+    # Account base features
+    # -------------------------------------------------------------------------
+    base_features = pd.DataFrame(index=accounts.index)
 
-    edge_index = torch.tensor(np.vstack([src, dst]), dtype=torch.long)
+    base_features["init_balance"] = accounts["INIT_BALANCE"].astype(float)
+    base_features["tx_behavior_id"] = accounts["TX_BEHAVIOR_ID"].astype(float)
 
-    x = torch.tensor(x_np, dtype=torch.float)
+    country_dummies = pd.get_dummies(
+        accounts["COUNTRY"].astype(str),
+        prefix="country",
+        dtype=float,
+    )
+
+    account_type_dummies = pd.get_dummies(
+        accounts["ACCOUNT_TYPE"].astype(str),
+        prefix="account_type",
+        dtype=float,
+    )
+
+    features = pd.concat(
+        [
+            base_features,
+            country_dummies,
+            account_type_dummies,
+            agg_features,
+        ],
+        axis=1,
+    )
+
+    for col in features.columns:
+        features[col] = _standardise_numeric(features[col])
+
+    x = torch.tensor(features.values, dtype=torch.float32)
+
+    # -------------------------------------------------------------------------
+    # Labels
+    # -------------------------------------------------------------------------
+    # accounts label:
+    #   accounts.IS_FRAUD gives account-level fraud labels directly.
+    #
+    # transaction label:
+    #   an account is marked fraud if it appears in at least one fraudulent
+    #   transaction as sender or receiver.
+    #
+    # combined label:
+    #   fraud if either account-level label or transaction-derived label is fraud.
+    # -------------------------------------------------------------------------
+    account_label_np = accounts["IS_FRAUD"].astype(bool).astype(int).values
+
+    tx_fraud = tx[tx["IS_FRAUD"]].copy()
+
+    transaction_label_np = np.zeros(num_accounts, dtype=int)
+
+    if len(tx_fraud) > 0:
+        fraud_src = tx_fraud["src_idx"].astype(int).values
+        fraud_dst = tx_fraud["dst_idx"].astype(int).values
+
+        transaction_label_np[fraud_src] = 1
+        transaction_label_np[fraud_dst] = 1
+
+    if label_source == "accounts":
+        y_np = account_label_np
+    elif label_source == "transactions":
+        y_np = transaction_label_np
+    elif label_source == "combined":
+        y_np = np.maximum(account_label_np, transaction_label_np)
+    else:
+        raise ValueError(f"Unsupported label_source: {label_source}")
+
     y = torch.tensor(y_np, dtype=torch.long)
 
-    num_nodes = len(accounts)
-    indices = np.arange(num_nodes)
-
-    # Stratified node split.
-    train_val_idx, test_idx = train_test_split(
-        indices,
-        test_size=test_size,
-        random_state=seed,
-        stratify=y_np,
+    # -------------------------------------------------------------------------
+    # Edge index and edge attributes
+    # -------------------------------------------------------------------------
+    edge_index = torch.tensor(
+        np.vstack(
+            [
+                tx["src_idx"].values,
+                tx["dst_idx"].values,
+            ]
+        ),
+        dtype=torch.long,
     )
 
-    adjusted_val_size = val_size / (1.0 - test_size)
-
-    train_idx, val_idx = train_test_split(
-        train_val_idx,
-        test_size=adjusted_val_size,
-        random_state=seed,
-        stratify=y_np[train_val_idx],
+    edge_attr_df = pd.DataFrame(
+        {
+            "tx_amount": tx["TX_AMOUNT"].values,
+            "timestamp": tx["TIMESTAMP"].values,
+            "tx_is_fraud": tx["IS_FRAUD"].astype(int).values,
+        }
     )
 
-    train_mask = torch.zeros(num_nodes, dtype=torch.bool)
-    val_mask = torch.zeros(num_nodes, dtype=torch.bool)
-    test_mask = torch.zeros(num_nodes, dtype=torch.bool)
+    edge_attr_df["tx_amount"] = _standardise_numeric(edge_attr_df["tx_amount"])
+    edge_attr_df["timestamp"] = _standardise_numeric(edge_attr_df["timestamp"])
+
+    edge_attr = torch.tensor(edge_attr_df.values, dtype=torch.float32)
+
+    # -------------------------------------------------------------------------
+    # Split masks
+    # -------------------------------------------------------------------------
+    rng = np.random.default_rng(seed)
+    indices = np.arange(num_accounts)
+
+    if temporal_split:
+        # Account-level temporal proxy:
+        # accounts are ordered by first transaction timestamp.
+        first_out = tx.groupby("src_idx")["TIMESTAMP"].min()
+        first_in = tx.groupby("dst_idx")["TIMESTAMP"].min()
+
+        first_seen = pd.concat([first_out, first_in], axis=1).min(axis=1)
+
+        fallback_time = int(tx["TIMESTAMP"].max()) + 1
+        first_seen = first_seen.reindex(
+            range(num_accounts),
+            fill_value=fallback_time,
+        )
+
+        sorted_indices = first_seen.sort_values().index.to_numpy()
+    else:
+        sorted_indices = indices.copy()
+        rng.shuffle(sorted_indices)
+
+    train_end = int(train_ratio * num_accounts)
+    val_end = int((train_ratio + val_ratio) * num_accounts)
+
+    train_idx = sorted_indices[:train_end]
+    val_idx = sorted_indices[train_end:val_end]
+    test_idx = sorted_indices[val_end:]
+
+    train_mask = torch.zeros(num_accounts, dtype=torch.bool)
+    val_mask = torch.zeros(num_accounts, dtype=torch.bool)
+    test_mask = torch.zeros(num_accounts, dtype=torch.bool)
 
     train_mask[torch.tensor(train_idx, dtype=torch.long)] = True
     val_mask[torch.tensor(val_idx, dtype=torch.long)] = True
@@ -189,44 +347,46 @@ def build_ibm_amlsim_graph(
     data = Data(
         x=x,
         edge_index=edge_index,
+        edge_attr=edge_attr,
         y=y,
         train_mask=train_mask,
         val_mask=val_mask,
         test_mask=test_mask,
     )
 
-    data.dataset_name = "IBM AMLSim"
-    data.task_name = "account_node_classification"
-    data.label_meaning = "normal=0, fraud=1"
+    data.account_ids = torch.tensor(account_ids, dtype=torch.long)
+    data.feature_names = list(features.columns)
+
+    data.num_transactions = int(tx.shape[0])
+    data.num_fraud_transactions = int(tx["IS_FRAUD"].sum())
+
+    data.num_fraud_accounts = int(y.sum())
+    data.num_account_label_fraud_accounts = int(account_label_np.sum())
+    data.num_transaction_label_fraud_accounts = int(transaction_label_np.sum())
+
+    data.label_source = label_source
+    data.temporal_split = bool(temporal_split)
 
     return data
 
 
 def describe_ibm_amlsim_data(data: Data) -> dict:
-    def mask_count(mask):
-        return int(mask.sum().item())
-
-    def fraud_count(mask):
-        return int((data.y[mask] == 1).sum().item())
-
-    def normal_count(mask):
-        return int((data.y[mask] == 0).sum().item())
-
     return {
-        "dataset": "IBM AMLSim",
-        "task": "account node classification",
-        "num_nodes": data.num_nodes,
-        "num_edges": data.num_edges,
-        "num_features": data.num_features,
-        "num_fraud_nodes": int((data.y == 1).sum().item()),
-        "num_normal_nodes": int((data.y == 0).sum().item()),
-        "train_samples": mask_count(data.train_mask),
-        "train_fraud": fraud_count(data.train_mask),
-        "train_normal": normal_count(data.train_mask),
-        "val_samples": mask_count(data.val_mask),
-        "val_fraud": fraud_count(data.val_mask),
-        "val_normal": normal_count(data.val_mask),
-        "test_samples": mask_count(data.test_mask),
-        "test_fraud": fraud_count(data.test_mask),
-        "test_normal": normal_count(data.test_mask),
+        "num_nodes": int(data.num_nodes),
+        "num_edges": int(data.edge_index.size(1)),
+        "num_node_features": int(data.num_features),
+        "num_edge_features": int(data.edge_attr.size(1)) if data.edge_attr is not None else 0,
+        "num_transactions": int(data.num_transactions),
+        "num_fraud_transactions": int(data.num_fraud_transactions),
+        "num_fraud_accounts": int(data.num_fraud_accounts),
+        "num_account_label_fraud_accounts": int(data.num_account_label_fraud_accounts),
+        "num_transaction_label_fraud_accounts": int(data.num_transaction_label_fraud_accounts),
+        "label_source": str(data.label_source),
+        "train_nodes": int(data.train_mask.sum()),
+        "val_nodes": int(data.val_mask.sum()),
+        "test_nodes": int(data.test_mask.sum()),
+        "train_fraud_accounts": int(data.y[data.train_mask].sum()),
+        "val_fraud_accounts": int(data.y[data.val_mask].sum()),
+        "test_fraud_accounts": int(data.y[data.test_mask].sum()),
+        "temporal_split": bool(data.temporal_split),
     }
