@@ -1,0 +1,2 @@
+model,best_epoch,train_accuracy,train_illicit_precision,train_illicit_recall,train_illicit_f1,val_accuracy,val_illicit_precision,val_illicit_recall,val_illicit_f1,test_accuracy,test_illicit_precision,test_illicit_recall,test_illicit_f1
+gatv2,624,0.9879402630013877,0.9557208643287283,0.9183117767188563,0.9366429439333449,0.9808160343593414,0.9408194233687405,0.8671328671328671,0.9024745269286754,0.9823902072371953,0.9354066985645934,0.8766816143497758,0.9050925925925926
