@@ -6,8 +6,8 @@ import torch
 from torch_geometric.data import Data
 
 
-ILLICIT_LABEL = 1
-LICIT_LABEL = 0
+FRAUD_LABEL = 1
+NORMAL_LABEL = 0
 
 
 def _standardise_numeric(series: pd.Series) -> pd.Series:
@@ -28,6 +28,7 @@ def build_ibm_amlsim_data(
     test_ratio: float = 0.20,
     temporal_split: bool = False,
     label_source: str = "accounts",
+    include_fraud_tx_features: bool = False,
 ) -> Data:
     """
     Build a PyTorch Geometric account-level graph from IBM AMLSim-style CSV files.
@@ -42,6 +43,9 @@ def build_ibm_amlsim_data(
     Edge:
         SENDER_ACCOUNT_ID -> RECEIVER_ACCOUNT_ID
 
+    Main recommended label setting:
+        label_source="accounts"
+
     Label options:
         label_source="accounts":
             Use accounts.IS_FRAUD directly.
@@ -54,11 +58,12 @@ def build_ibm_amlsim_data(
             Mark an account as fraud if either accounts.IS_FRAUD is True or the
             account appears in at least one fraudulent transaction.
 
-    Main recommended setting:
-        label_source="accounts"
+    Feature leakage warning:
+        include_fraud_tx_features=False by default.
 
-    Features:
-        account attributes + transaction aggregation features
+        Do not use fraud_tx_sent_count or fraud_tx_received_count in the final
+        experiment because they are derived from transactions.IS_FRAUD and may
+        leak fraud-label information into the model.
     """
 
     data_dir = Path(data_dir)
@@ -105,7 +110,6 @@ def build_ibm_amlsim_data(
     tx = tx.copy()
 
     label_source = label_source.lower()
-
     valid_label_sources = {"accounts", "transactions", "combined"}
 
     if label_source not in valid_label_sources:
@@ -121,12 +125,13 @@ def build_ibm_amlsim_data(
     accounts = accounts.sort_values("ACCOUNT_ID").reset_index(drop=True)
 
     account_ids = accounts["ACCOUNT_ID"].tolist()
+
     account_to_idx = {
         account_id: idx
         for idx, account_id in enumerate(account_ids)
     }
 
-    # Keep transactions where both sender and receiver exist in accounts.csv.
+    # Keep only transactions where both sender and receiver exist in accounts.csv.
     tx = tx[
         tx["SENDER_ACCOUNT_ID"].isin(account_to_idx)
         & tx["RECEIVER_ACCOUNT_ID"].isin(account_to_idx)
@@ -179,32 +184,40 @@ def build_ibm_amlsim_data(
         .reindex(range(num_accounts), fill_value=0.0)
     )
 
-    fraud_tx = tx[tx["IS_FRAUD"]]
+    agg_features_dict = {
+        "out_degree": out_degree.values,
+        "in_degree": in_degree.values,
+        "total_sent_amount": total_sent.values,
+        "total_received_amount": total_received.values,
+        "mean_sent_amount": mean_sent.values,
+        "mean_received_amount": mean_received.values,
+    }
 
-    fraud_sent_count = (
-        fraud_tx.groupby("src_idx")
-        .size()
-        .reindex(range(num_accounts), fill_value=0)
-    )
+    # -------------------------------------------------------------------------
+    # Optional leakage-prone fraud transaction features
+    # -------------------------------------------------------------------------
+    # These are disabled by default because they are derived from tx.IS_FRAUD.
+    # Keep them only for debugging or ablation, not for the main experiment.
+    # -------------------------------------------------------------------------
+    if include_fraud_tx_features:
+        fraud_tx = tx[tx["IS_FRAUD"]]
 
-    fraud_received_count = (
-        fraud_tx.groupby("dst_idx")
-        .size()
-        .reindex(range(num_accounts), fill_value=0)
-    )
+        fraud_sent_count = (
+            fraud_tx.groupby("src_idx")
+            .size()
+            .reindex(range(num_accounts), fill_value=0)
+        )
 
-    agg_features = pd.DataFrame(
-        {
-            "out_degree": out_degree.values,
-            "in_degree": in_degree.values,
-            "total_sent_amount": total_sent.values,
-            "total_received_amount": total_received.values,
-            "mean_sent_amount": mean_sent.values,
-            "mean_received_amount": mean_received.values,
-            "fraud_tx_sent_count": fraud_sent_count.values,
-            "fraud_tx_received_count": fraud_received_count.values,
-        }
-    )
+        fraud_received_count = (
+            fraud_tx.groupby("dst_idx")
+            .size()
+            .reindex(range(num_accounts), fill_value=0)
+        )
+
+        agg_features_dict["fraud_tx_sent_count"] = fraud_sent_count.values
+        agg_features_dict["fraud_tx_received_count"] = fraud_received_count.values
+
+    agg_features = pd.DataFrame(agg_features_dict)
 
     # -------------------------------------------------------------------------
     # Account base features
@@ -295,9 +308,11 @@ def build_ibm_amlsim_data(
         {
             "tx_amount": tx["TX_AMOUNT"].values,
             "timestamp": tx["TIMESTAMP"].values,
-            "tx_is_fraud": tx["IS_FRAUD"].astype(int).values,
         }
     )
+
+    # Do not include tx.IS_FRAUD as an edge feature in the final setup.
+    # It is a transaction label and can leak fraud information.
 
     edge_attr_df["tx_amount"] = _standardise_numeric(edge_attr_df["tx_amount"])
     edge_attr_df["timestamp"] = _standardise_numeric(edge_attr_df["timestamp"])
@@ -319,6 +334,7 @@ def build_ibm_amlsim_data(
         first_seen = pd.concat([first_out, first_in], axis=1).min(axis=1)
 
         fallback_time = int(tx["TIMESTAMP"].max()) + 1
+
         first_seen = first_seen.reindex(
             range(num_accounts),
             fill_value=fallback_time,
@@ -366,8 +382,33 @@ def build_ibm_amlsim_data(
 
     data.label_source = label_source
     data.temporal_split = bool(temporal_split)
+    data.include_fraud_tx_features = bool(include_fraud_tx_features)
 
     return data
+
+
+# Backward-compatible alias for older scripts.
+# Your older code imports build_ibm_amlsim_graph, so we keep this name working.
+def build_ibm_amlsim_graph(
+    data_dir: str | Path = "data/raw/ibm_amlsim",
+    seed: int = 42,
+    train_ratio: float = 0.60,
+    val_ratio: float = 0.20,
+    test_ratio: float = 0.20,
+    temporal_split: bool = False,
+    label_source: str = "accounts",
+    include_fraud_tx_features: bool = False,
+) -> Data:
+    return build_ibm_amlsim_data(
+        data_dir=data_dir,
+        seed=seed,
+        train_ratio=train_ratio,
+        val_ratio=val_ratio,
+        test_ratio=test_ratio,
+        temporal_split=temporal_split,
+        label_source=label_source,
+        include_fraud_tx_features=include_fraud_tx_features,
+    )
 
 
 def describe_ibm_amlsim_data(data: Data) -> dict:
@@ -376,17 +417,25 @@ def describe_ibm_amlsim_data(data: Data) -> dict:
         "num_edges": int(data.edge_index.size(1)),
         "num_node_features": int(data.num_features),
         "num_edge_features": int(data.edge_attr.size(1)) if data.edge_attr is not None else 0,
+        "num_features": int(data.num_features),
         "num_transactions": int(data.num_transactions),
         "num_fraud_transactions": int(data.num_fraud_transactions),
         "num_fraud_accounts": int(data.num_fraud_accounts),
         "num_account_label_fraud_accounts": int(data.num_account_label_fraud_accounts),
         "num_transaction_label_fraud_accounts": int(data.num_transaction_label_fraud_accounts),
         "label_source": str(data.label_source),
+        "include_fraud_tx_features": bool(data.include_fraud_tx_features),
         "train_nodes": int(data.train_mask.sum()),
         "val_nodes": int(data.val_mask.sum()),
         "test_nodes": int(data.test_mask.sum()),
+        "train_samples": int(data.train_mask.sum()),
+        "val_samples": int(data.val_mask.sum()),
+        "test_samples": int(data.test_mask.sum()),
         "train_fraud_accounts": int(data.y[data.train_mask].sum()),
         "val_fraud_accounts": int(data.y[data.val_mask].sum()),
         "test_fraud_accounts": int(data.y[data.test_mask].sum()),
+        "train_fraud": int(data.y[data.train_mask].sum()),
+        "val_fraud": int(data.y[data.val_mask].sum()),
+        "test_fraud": int(data.y[data.test_mask].sum()),
         "temporal_split": bool(data.temporal_split),
     }
