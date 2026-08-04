@@ -1,0 +1,19 @@
+Dataset,Model,Explainer,Top-K,Nodes,Deletion drop,Flip rate,Insertion fraud prob.,Insertion preservation,Sparsity,Interpretation
+Elliptic,GCN,GNNExplainer,20,6,0.6721741785295308,1.0,0.8224104543526968,1.0,0.9994539100043688,strong deletion effect; prediction flips observed; high sufficiency
+Elliptic,GCN,PGExplainer,20,6,0.6721741785295308,1.0,0.8224104543526968,1.0,0.9994539100043688,strong deletion effect; prediction flips observed; high sufficiency
+Elliptic,GCN,SubgraphX,20,6,0.2961576047043006,0.3333333333333333,0.6432197250736257,0.6666666666666666,0.9999499417504004,strong deletion effect; prediction flips observed; moderate sufficiency
+Elliptic,GraphSAGE,GNNExplainer,20,7,0.1240556240081787,0.2857142857142857,0.8455122624124799,1.0,0.9994539100043688,moderate deletion effect; some prediction flips; high sufficiency
+Elliptic,GraphSAGE,PGExplainer,20,7,0.126599439552852,0.2857142857142857,0.8462504403931754,1.0,0.9994539100043688,moderate deletion effect; some prediction flips; high sufficiency
+Elliptic,GraphSAGE,SubgraphX,20,7,-0.0090800012860979,0.0,0.8010332456656865,0.8571428571428571,0.9999765961430443,weak deletion effect; no prediction flips; high sufficiency
+Elliptic,GATv2,GNNExplainer,20,10,0.1891995896119624,0.2,0.9321179568767548,1.0,0.9994539100043688,moderate deletion effect; some prediction flips; high sufficiency
+Elliptic,GATv2,PGExplainer,20,10,0.1892076123971492,0.2,0.9321259915828704,1.0,0.9994539100043688,moderate deletion effect; some prediction flips; high sufficiency
+Elliptic,GATv2,SubgraphX,20,10,0.1776778496801853,0.3,0.9415855467319488,1.0,0.9999590432503276,moderate deletion effect; prediction flips observed; high sufficiency
+AMLSim,GCN,GNNExplainer,20,10,6.794929504394531e-07,0.0,0.8766325384378433,0.9,0.9979596251732528,weak deletion effect; no prediction flips; high sufficiency
+AMLSim,GCN,PGExplainer,20,10,0.0,0.0,0.962694936990738,1.0,0.9979596251732528,weak deletion effect; no prediction flips; high sufficiency; PGExplainer masks collapsed
+AMLSim,GCN,SubgraphX (1-hop),20,10,1.1920928955078126e-08,0.0,0.9626949310302736,1.0,0.9947701568512676,weak deletion effect; no prediction flips; high sufficiency; 1-hop reduced setting
+AMLSim,GraphSAGE,GNNExplainer,20,10,0.0,0.0,0.9999997854232788,1.0,0.985638291879425,weak deletion effect; no prediction flips; high sufficiency; saturated fraud probabilities likely
+AMLSim,GraphSAGE,PGExplainer,20,10,0.0,0.0,0.9999998569488524,1.0,0.985638291879425,weak deletion effect; no prediction flips; high sufficiency; PGExplainer masks collapsed; saturated fraud probabilities likely
+AMLSim,GraphSAGE,SubgraphX (1-hop),20,10,1.5497207641601566e-07,0.0,0.9999980807304384,1.0,0.9147562076471536,weak deletion effect; no prediction flips; high sufficiency; 1-hop reduced setting; saturated fraud probabilities likely
+AMLSim,GATv2,GNNExplainer,20,10,0.277130614221096,0.3,0.6544120863080025,0.5,0.9872318020152544,strong deletion effect; prediction flips observed; moderate sufficiency; saturated fraud probabilities likely
+AMLSim,GATv2,PGExplainer,20,10,0.0,0.0,0.2341754905879497,0.0,0.9872318020152544,weak deletion effect; no prediction flips; low sufficiency; PGExplainer masks collapsed; saturated fraud probabilities likely
+AMLSim,GATv2,SubgraphX (1-hop),20,10,-0.0007746174931526,0.0,0.2343996919691562,1.0,0.9406110328539312,weak deletion effect; no prediction flips; high sufficiency; 1-hop reduced setting; saturated fraud probabilities likely
